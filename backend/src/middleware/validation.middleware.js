@@ -58,6 +58,13 @@ const createAccountValidation = [
     validate,
 ];
 
+const depositValidation = [
+    body('amount')
+        .notEmpty().withMessage('Amount is required')
+        .isFloat({ gt: 0 }).withMessage('Amount must be a positive number'),
+    validate,
+];
+
 const createTransactionValidation = [
     body('fromAccount')
         .notEmpty().withMessage('From account is required')
@@ -96,6 +103,7 @@ module.exports = {
     registerValidation,
     loginValidation,
     createAccountValidation,
+    depositValidation,
     createTransactionValidation,
     mongoIdParam,
     paginationValidation,

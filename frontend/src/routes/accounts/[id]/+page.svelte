@@ -33,6 +33,10 @@
 	let totalPages = $state(1);
 	let statusLoading = $state(false);
 	let error = $state('');
+	let showDeposit = $state(false);
+	let depositAmount = $state('');
+	let depositLoading = $state(false);
+	let depositError = $state('');
 
 	const id = page.params.id;
 
@@ -87,6 +91,27 @@
 		ledgerPage = p;
 		await loadLedger();
 	}
+
+	async function deposit(e: Event) {
+		e.preventDefault();
+		depositLoading = true;
+		depositError = '';
+		try {
+			const token = auth.getToken()!;
+			await api(`/accounts/${id}/deposit`, {
+				method: 'POST',
+				body: { amount: parseFloat(depositAmount) },
+				token,
+			});
+			showDeposit = false;
+			depositAmount = '';
+			await Promise.all([loadAccount(), loadLedger()]);
+		} catch (err) {
+			depositError = err instanceof ApiError ? err.message : 'Deposit failed';
+		} finally {
+			depositLoading = false;
+		}
+	}
 </script>
 
 {#if loading}
@@ -98,7 +123,41 @@
 				<a href="/accounts" class="back-link">← Accounts</a>
 				<h2 class="page-title"><span class="accent">▍</span> Account Detail</h2>
 			</div>
+			{#if account.status === 'ACTIVE'}
+				<button class="btn btn-primary btn-sm" onclick={() => showDeposit = !showDeposit}>
+					{showDeposit ? '✕ Cancel' : '+ Deposit Funds'}
+				</button>
+			{/if}
 		</div>
+
+		{#if showDeposit}
+			<div class="card deposit-form">
+				<form onsubmit={deposit}>
+					<h3 class="form-title">Deposit Funds</h3>
+					{#if depositError}
+						<div class="alert alert-error">{depositError}</div>
+					{/if}
+					<div class="form-row">
+						<div class="input-group" style="flex:1">
+							<label for="deposit-amount">Amount ({account.currency})</label>
+							<input
+								id="deposit-amount"
+								type="number"
+								min="0.01"
+								step="0.01"
+								placeholder="e.g. 1000"
+								bind:value={depositAmount}
+								required
+							/>
+						</div>
+						<button class="btn btn-primary" type="submit" disabled={depositLoading}>
+							{#if depositLoading}<span class="spinner"></span>{/if}
+							Deposit
+						</button>
+					</div>
+				</form>
+			</div>
+		{/if}
 
 		{#if error}
 			<div class="alert alert-error">{error}</div>
@@ -293,4 +352,26 @@
 
 	.text-green { color: var(--clr-success); }
 	.text-red { color: var(--clr-danger); }
+
+	.deposit-form {
+		padding: 24px;
+		margin-bottom: 24px;
+	}
+
+	.form-title {
+		font-family: var(--font-mono);
+		font-size: 0.8rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--clr-text-2);
+		margin-bottom: 16px;
+	}
+
+	.form-row {
+		display: flex;
+		align-items: flex-end;
+		gap: 16px;
+		flex-wrap: wrap;
+	}
 </style>

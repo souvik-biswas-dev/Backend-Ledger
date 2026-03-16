@@ -6,6 +6,7 @@ const {
     createAccountValidation,
     mongoIdParam,
     paginationValidation,
+    depositValidation,
 } = require('../middleware/validation.middleware');
 const { body } = require('express-validator');
 const { validate } = require('../middleware/validation.middleware');
@@ -14,6 +15,7 @@ const { validate } = require('../middleware/validation.middleware');
 router.use(authMiddleware);
 
 router.post('/', createAccountValidation, accountController.createAccountController);
+router.post('/:id/deposit', mongoIdParam, depositValidation, accountController.depositController);
 router.get('/', paginationValidation, accountController.getAccountsController);
 router.get('/:id', mongoIdParam, accountController.getAccountByIdController);
 router.get('/:id/balance', mongoIdParam, accountController.getAccountBalanceController);

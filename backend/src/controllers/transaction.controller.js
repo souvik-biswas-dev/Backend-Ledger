@@ -2,7 +2,6 @@ const transactionModel = require('../models/transaction.model');
 const ledgerModel = require('../models/ledger.model');
 const accountModel = require('../models/account.model');
 const emailService = require('../services/email.service');
-const mongoose = require('mongoose');
 
 /**
  * @POST
@@ -97,61 +96,38 @@ async function createTransactionController(req, res) {
         });
     }
 
-    // Execute atomic transaction
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // Execute writes sequentially — no replica set required
+    const newTransaction = await transactionModel.create({
+        fromAccount,
+        toAccount,
+        amount,
+        status: 'PENDING',
+        idempotencyKey,
+    });
 
     try {
-        const [newTransaction] = await transactionModel.create([{
-            fromAccount,
-            toAccount,
-            amount,
-            status: 'PENDING',
-            idempotencyKey,
-        }], { session });
-
-        await ledgerModel.create([{
+        await ledgerModel.create({
             account: fromAccount,
             amount,
             transaction: newTransaction._id,
             type: 'DEBIT',
-        }], { session });
+        });
 
-        await ledgerModel.create([{
+        await ledgerModel.create({
             account: toAccount,
             amount,
             transaction: newTransaction._id,
             type: 'CREDIT',
-        }], { session });
+        });
 
         newTransaction.status = 'COMPLETED';
-        await newTransaction.save({ session });
-
-        await session.commitTransaction();
-
-        // Fire-and-forget email notification
-        emailService.sendTransactionEmail(
-            req.user.email,
-            req.user.name,
-            amount,
-            newTransaction._id
-        ).catch(err => console.error('Email notification failed:', err));
-
-        return res.status(201).json({
-            status: 'success',
-            message: 'Transaction completed successfully',
-            transaction: newTransaction,
-        });
+        await newTransaction.save();
     } catch (err) {
-        await session.abortTransaction();
-
-        // Attempt to mark the transaction as FAILED if it was created
-        try {
-            await transactionModel.findOneAndUpdate(
-                { idempotencyKey, status: 'PENDING' },
-                { status: 'FAILED' }
-            );
-        } catch (_) { /* best effort */ }
+        // Best-effort: mark the transaction as FAILED so the idempotency key is re-usable via a new key
+        await transactionModel.findOneAndUpdate(
+            { idempotencyKey, status: 'PENDING' },
+            { status: 'FAILED' }
+        ).catch(() => {});
 
         emailService.sendTransactionFailureEmail(
             req.user.email,
@@ -161,9 +137,21 @@ async function createTransactionController(req, res) {
         ).catch(emailErr => console.error('Failure email notification failed:', emailErr));
 
         throw err;
-    } finally {
-        session.endSession();
     }
+
+    // Fire-and-forget email notification
+    emailService.sendTransactionEmail(
+        req.user.email,
+        req.user.name,
+        amount,
+        newTransaction._id
+    ).catch(err => console.error('Email notification failed:', err));
+
+    return res.status(201).json({
+        status: 'success',
+        message: 'Transaction completed successfully',
+        transaction: newTransaction,
+    });
 }
 
 /**

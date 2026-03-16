@@ -2,10 +2,17 @@ const mongoose = require("mongoose");
 
 
 const transactionSchema = new mongoose.Schema({
+    type: {
+        type: String,
+        enum: {
+            values: ["TRANSFER", "DEPOSIT"],
+            message: "Type can be either TRANSFER or DEPOSIT"
+        },
+        default: "TRANSFER"
+    },
     fromAccount: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "account",
-        required: [true, "Transaction must be associated with a from account"],
         index: true
     },
     toAccount: {

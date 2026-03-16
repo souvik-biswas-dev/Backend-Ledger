@@ -1,5 +1,6 @@
 const accountModel = require('../models/account.model');
 const ledgerModel = require('../models/ledger.model');
+const transactionModel = require('../models/transaction.model');
 
 /**
  * @POST
@@ -206,6 +207,62 @@ async function updateAccountStatusController(req, res) {
     });
 }
 
+/**
+ * @POST
+ * @CONTROLLER deposit funds into an account (dummy credit — no real money)
+ * @ROUTE /api/accounts/:id/deposit
+ */
+async function depositController(req, res) {
+    const { amount } = req.body;
+
+    const account = await accountModel.findOne({
+        _id: req.params.id,
+        user: req.user._id,
+    });
+
+    if (!account) {
+        return res.status(404).json({
+            status: 'error',
+            message: 'Account not found',
+        });
+    }
+
+    if (account.status !== 'ACTIVE') {
+        return res.status(400).json({
+            status: 'error',
+            message: 'Account must be ACTIVE to deposit funds',
+        });
+    }
+
+    const transaction = await transactionModel.create({
+        type: 'DEPOSIT',
+        toAccount: account._id,
+        amount,
+        status: 'COMPLETED',
+        idempotencyKey: `deposit-${account._id}-${Date.now()}`,
+    });
+
+    try {
+        await ledgerModel.create({
+            account: account._id,
+            amount,
+            transaction: transaction._id,
+            type: 'CREDIT',
+        });
+    } catch (err) {
+        // Ledger write failed — mark transaction as FAILED and re-throw
+        await transactionModel.findByIdAndUpdate(transaction._id, { status: 'FAILED' });
+        throw err;
+    }
+
+    const balance = await account.getBalance();
+
+    return res.status(200).json({
+        status: 'success',
+        data: { transactionId: transaction._id, amount, balance },
+    });
+}
+
 module.exports = {
     createAccountController,
     getAccountsController,
@@ -213,4 +270,5 @@ module.exports = {
     getAccountBalanceController,
     getAccountLedgerController,
     updateAccountStatusController,
+    depositController,
 };
