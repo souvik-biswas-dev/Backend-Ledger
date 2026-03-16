@@ -1,14 +1,21 @@
 const mongoose = require('mongoose');
 
-function ConnectToDB(){
-    mongoose.connect(process.env.MONGO_URI)
-    .then(() => {
-        console.log("DB Connected ✅");
-    })
-    .catch(err => {
-        console.log("Error Connecting to DB ❌");
+async function ConnectToDB() {
+    try {
+        await mongoose.connect(process.env.MONGO_URI);
+        console.log('DB Connected ✅');
+    } catch (err) {
+        console.error('Error Connecting to DB ❌', err.message);
         process.exit(1);
-    })
+    }
+
+    mongoose.connection.on('error', (err) => {
+        console.error('MongoDB connection error:', err.message);
+    });
+
+    mongoose.connection.on('disconnected', () => {
+        console.warn('MongoDB disconnected');
+    });
 }
 
 module.exports = ConnectToDB;

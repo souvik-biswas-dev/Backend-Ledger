@@ -5,164 +5,250 @@ const emailService = require('../services/email.service');
 const mongoose = require('mongoose');
 
 /**
- * - Create a new transaction
- * transaction flow:
- * 1. validate the request body
- * 2. check if the from account and to account exist
- * 3. validate the idempotency key to prevent duplicate transactions
- * 4. check account status to ensure they are active
- * 5. check if the from account has sufficient balance
- * 6. create a new transaction with status pending
- * 7. create debit entry in the from account ledger
- * 8. create credit entry in the to account ledger
- * 9. update the transaction status to completed
- * 10. commit mongoDB session to save all the changes in the database
- * 11. send an email notification to both accounts about the transaction status
- * 12. return the transaction details in the response
+ * @POST
+ * @CONTROLLER create a new transaction
+ * @ROUTE /api/transactions/
+ *
+ * Transaction flow:
+ * 1. Validate request & check accounts exist
+ * 2. Idempotency check
+ * 3. Verify accounts are active
+ * 4. Verify sufficient balance
+ * 5. Execute atomic transaction (debit + credit + ledger entries) inside a MongoDB session
+ * 6. Send email notification
  */
-async function createTransaction(req, res){
+async function createTransactionController(req, res) {
+    const { fromAccount, toAccount, amount, idempotencyKey } = req.body;
 
-    /**
-     * 1.validate the request body
-     */
-    const { fromAccount, toAccount, amount, idempodencyKey } = req.body();
-
-    if(!fromAccount || !toAccount || !amount || !idempodencyKey){
-        return res.status(400).json({ message: 'from account, to account, amount, and idempodencyKey are required' });
+    if (fromAccount === toAccount) {
+        return res.status(400).json({
+            status: 'error',
+            message: 'Cannot transfer to the same account',
+        });
     }
 
-    const fromUserAccount = await accountModel.findOne({
-        _id: fromAccount,
-    });
-    const toUserAccount = await accountModel.findOne({
-        _id: toAccount,
-    });
+    // Check accounts exist
+    const [fromUserAccount, toUserAccount] = await Promise.all([
+        accountModel.findById(fromAccount),
+        accountModel.findById(toAccount),
+    ]);
 
-    /**
-     * 2.Check if the from account and to account exist
-     */
-
-    if(!fromUserAccount || !toUserAccount){
-        return res.status(404).json({ message: 'from account or to account not found' });
+    if (!fromUserAccount || !toUserAccount) {
+        return res.status(404).json({
+            status: 'error',
+            message: 'Source or destination account not found',
+        });
     }
 
-    /**
-     * 3.Validate the idempotency key to prevent duplicate transactions
-     */
+    // Verify the requesting user owns the source account
+    if (fromUserAccount.user.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+            status: 'error',
+            message: 'You can only initiate transactions from your own account',
+        });
+    }
 
-    const isTransactionAlreadyExists = await transactionModel.findOne({
-        idempodencyKey: idempodencyKey
-    })
+    // Idempotency check
+    const existingTransaction = await transactionModel.findOne({ idempotencyKey });
 
-    if(isTransactionAlreadyExists){
-        if(isTransactionAlreadyExists.status === "COMPLETED"){
+    if (existingTransaction) {
+        if (existingTransaction.status === 'COMPLETED') {
             return res.status(200).json({
-                message: "Transaction Already Proccessed",
-                transaction: isTransactionAlreadyExists
-            })
+                status: 'success',
+                message: 'Transaction already processed',
+                transaction: existingTransaction,
+            });
         }
-        if(isTransactionAlreadyExists.status === "PENDING"){
-            return res.status(200).json({
-                message: "Transaction Still Processing",
-
-            })
+        if (existingTransaction.status === 'PENDING') {
+            return res.status(202).json({
+                status: 'pending',
+                message: 'Transaction is still processing',
+            });
         }
-        if(isTransactionAlreadyExists.status === "FAILED"){
-            return res.status(500).json({
-                message: "Transaction Processing failed, please retry"
-            })
-        }
-        if(isTransactionAlreadyExists.status === "REVERSED"){
-            return res.status(500).json({
-                message: "Transaction was reversed, please retry"
-            })
-        }
-
+        // FAILED or REVERSED — let them retry with a new key
+        return res.status(409).json({
+            status: 'error',
+            message: `Previous transaction ${existingTransaction.status.toLowerCase()}. Please use a new idempotency key to retry.`,
+        });
     }
 
-    /**
-     * 4.Check account status to ensure they are active
-     */
-    
-    if(fromUserAccount.status !== 'ACTIVE' || toUserAccount.status !== 'ACTIVE'){
-        return res.status(400).json({ message: 'from account or to account is not active' });
+    // Verify accounts are active
+    if (fromUserAccount.status !== 'ACTIVE' || toUserAccount.status !== 'ACTIVE') {
+        return res.status(400).json({
+            status: 'error',
+            message: 'Both accounts must be ACTIVE to perform a transaction',
+        });
     }
 
+    // Verify currency match
+    if (fromUserAccount.currency !== toUserAccount.currency) {
+        return res.status(400).json({
+            status: 'error',
+            message: 'Cross-currency transactions are not supported',
+        });
+    }
 
-    /**
-     * 5.Check if the from account has sufficient balance
-     */
+    // Check sufficient balance
     const balance = await fromUserAccount.getBalance();
-    if(balance < amount){
-        return res.status(400).json({ message: `Insufficient balance. Current balance: ${balance}` });
+    if (balance < amount) {
+        return res.status(400).json({
+            status: 'error',
+            message: `Insufficient balance. Current balance: ${balance}`,
+        });
     }
 
-    /**
-     * 6.Create a new transaction with status pending
-     */
-
+    // Execute atomic transaction
     const session = await mongoose.startSession();
-    session.startTransaction(); //complete all operations in the transaction, if any operation fails, the whole transaction will be rolled back
-    const newTransaction = await transactionModel.create({
-        fromAccount,
-        toAccount,
-        amount,
-        status: 'PENDING',
-        idempodencyKey,
-    },{ session });
+    session.startTransaction();
 
-    /**
-     * 7.Create debit entry in the from account ledger
-     */
+    try {
+        const [newTransaction] = await transactionModel.create([{
+            fromAccount,
+            toAccount,
+            amount,
+            status: 'PENDING',
+            idempotencyKey,
+        }], { session });
 
-    const debitLedgerEntry = await ledgerModel.create({
-        account: fromAccount,
-        amount: amount,
-        transaction: newTransaction._id,
-        type: 'DEBIT',
-    }, { session });
+        await ledgerModel.create([{
+            account: fromAccount,
+            amount,
+            transaction: newTransaction._id,
+            type: 'DEBIT',
+        }], { session });
 
-    /**
-     * 8.create credit entry in the to account ledger
-     */
+        await ledgerModel.create([{
+            account: toAccount,
+            amount,
+            transaction: newTransaction._id,
+            type: 'CREDIT',
+        }], { session });
 
-    const creditLedgerEntry = await ledgerModel.create({
-        account: toAccount,
-        amount: amount,
-        transaction: newTransaction._id,
-        type: 'CREDIT',
-    }, { session });
+        newTransaction.status = 'COMPLETED';
+        await newTransaction.save({ session });
 
-    /**
-     * 9.Update the transaction status to completed
-     */
+        await session.commitTransaction();
 
-    newTransaction.status = 'COMPLETED';
-    await newTransaction.save({ session });
+        // Fire-and-forget email notification
+        emailService.sendTransactionEmail(
+            req.user.email,
+            req.user.name,
+            amount,
+            newTransaction._id
+        ).catch(err => console.error('Email notification failed:', err));
 
-    /**
-     * 10.Commit mongoDB session to save all the changes in the database
-     */
+        return res.status(201).json({
+            status: 'success',
+            message: 'Transaction completed successfully',
+            transaction: newTransaction,
+        });
+    } catch (err) {
+        await session.abortTransaction();
 
-    await session.commitTransaction();
-    session.endSession();
+        // Attempt to mark the transaction as FAILED if it was created
+        try {
+            await transactionModel.findOneAndUpdate(
+                { idempotencyKey, status: 'PENDING' },
+                { status: 'FAILED' }
+            );
+        } catch (_) { /* best effort */ }
 
-    /**
-     * 11.Send an email notification to both accounts about the transaction status
-     */
+        emailService.sendTransactionFailureEmail(
+            req.user.email,
+            req.user.name,
+            amount,
+            idempotencyKey
+        ).catch(emailErr => console.error('Failure email notification failed:', emailErr));
 
-    await emailService.sendTransactionEmail(req.user.email, req.user.name, amount, toAccount, newTransaction._id);
+        throw err;
+    } finally {
+        session.endSession();
+    }
+}
 
-    /**
-     * 12.Return the transaction details in the response
-     */
+/**
+ * @GET
+ * @CONTROLLER get all transactions for the logged in user's accounts
+ * @ROUTE /api/transactions/
+ */
+async function getTransactionsController(req, res) {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
 
-    return res.status(201).json(
-        {   message: 'Transaction successful',
-            transaction: newTransaction });
+    // Get all accounts owned by user
+    const userAccounts = await accountModel.find({ user: req.user._id }).select('_id');
+    const accountIds = userAccounts.map(a => a._id);
 
+    const filter = {
+        $or: [
+            { fromAccount: { $in: accountIds } },
+            { toAccount: { $in: accountIds } },
+        ],
+    };
+
+    const [transactions, total] = await Promise.all([
+        transactionModel.find(filter)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .populate('fromAccount', 'currency status')
+            .populate('toAccount', 'currency status'),
+        transactionModel.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
+        status: 'success',
+        data: transactions,
+        pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+        },
+    });
+}
+
+/**
+ * @GET
+ * @CONTROLLER get a single transaction by ID
+ * @ROUTE /api/transactions/:id
+ */
+async function getTransactionByIdController(req, res) {
+    const transaction = await transactionModel.findById(req.params.id)
+        .populate('fromAccount', 'currency status user')
+        .populate('toAccount', 'currency status user');
+
+    if (!transaction) {
+        return res.status(404).json({
+            status: 'error',
+            message: 'Transaction not found',
+        });
+    }
+
+    // Verify user owns one of the accounts involved
+    const userAccounts = await accountModel.find({ user: req.user._id }).select('_id');
+    const accountIds = userAccounts.map(a => a._id.toString());
+
+    const isInvolved =
+        accountIds.includes(transaction.fromAccount._id.toString()) ||
+        accountIds.includes(transaction.toAccount._id.toString());
+
+    if (!isInvolved) {
+        return res.status(403).json({
+            status: 'error',
+            message: 'You do not have access to this transaction',
+        });
+    }
+
+    return res.status(200).json({
+        status: 'success',
+        data: transaction,
+    });
 }
 
 module.exports = {
-    createTransaction
-}
+    createTransactionController,
+    getTransactionsController,
+    getTransactionByIdController,
+};

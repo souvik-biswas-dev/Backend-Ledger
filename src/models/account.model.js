@@ -28,7 +28,7 @@ const accountSchema = new mongoose.Schema({
 accountSchema.index({user: 1, status: 1}) //compound index
 
 accountSchema.methods.getBalance = async function(){
-    const balanceData = await ledgerModel.aggregate([ //aggregation pipeline {used for custom queries and data transformation}
+    const balanceData = await ledgerModel.aggregate([
         {$match : {account : this._id}},
         {
             $group: {
@@ -61,7 +61,9 @@ accountSchema.methods.getBalance = async function(){
                 }
             }
         }
-    ])
+    ]);
+
+    return balanceData.length > 0 ? balanceData[0].balance : 0;
 }
 
 const accountModel = mongoose.model("account", accountSchema);

@@ -1,4 +1,3 @@
-const { request } = require('../app');
 const userModel = require('../models/user.model');
 const jwt = require("jsonwebtoken");
 
