@@ -188,7 +188,7 @@ a:hover {
 
 .input-group input,
 .input-group select {
-	padding: 10px 14px;
+	padding: 10px 15px;
 	background: var(--clr-bg);
 	border: 1px solid var(--clr-border);
 	border-radius: var(--radius-sm);
